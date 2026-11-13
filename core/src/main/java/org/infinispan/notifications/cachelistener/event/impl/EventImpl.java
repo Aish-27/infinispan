@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Objects;
 
 import org.infinispan.Cache;
+import org.infinispan.commons.util.IntSet;
 import org.infinispan.distribution.ch.ConsistentHash;
 import org.infinispan.metadata.Metadata;
 import org.infinispan.notifications.cachelistener.event.CacheEntriesEvictedEvent;
@@ -21,6 +22,7 @@ import org.infinispan.notifications.cachelistener.event.CacheEntryVisitedEvent;
 import org.infinispan.notifications.cachelistener.event.DataRehashedEvent;
 import org.infinispan.notifications.cachelistener.event.PartitionStatusChangedEvent;
 import org.infinispan.notifications.cachelistener.event.PersistenceAvailabilityChangedEvent;
+import org.infinispan.notifications.cachelistener.event.SegmentsLostEvent;
 import org.infinispan.notifications.cachelistener.event.TopologyChangedEvent;
 import org.infinispan.notifications.cachelistener.event.TransactionCompletedEvent;
 import org.infinispan.notifications.cachelistener.event.TransactionRegisteredEvent;
@@ -37,7 +39,7 @@ import org.infinispan.transaction.xa.GlobalTransaction;
 public class EventImpl<K, V> implements CacheEntryActivatedEvent, CacheEntryCreatedEvent, CacheEntriesEvictedEvent, CacheEntryLoadedEvent, CacheEntryModifiedEvent,
                                         CacheEntryPassivatedEvent, CacheEntryRemovedEvent, CacheEntryVisitedEvent, TransactionCompletedEvent, TransactionRegisteredEvent,
                                         CacheEntryInvalidatedEvent, DataRehashedEvent, TopologyChangedEvent, CacheEntryExpiredEvent, PartitionStatusChangedEvent,
-                                        PersistenceAvailabilityChangedEvent, Cloneable {
+                                        PersistenceAvailabilityChangedEvent, SegmentsLostEvent, Cloneable {
    private boolean pre = false; // by default events are after the fact
    private transient Cache<K, V> cache;
    private K key;
@@ -58,6 +60,7 @@ public class EventImpl<K, V> implements CacheEntryActivatedEvent, CacheEntryCrea
    private boolean isCurrentState;
    private AvailabilityMode mode;
    private boolean available;
+   private IntSet lostSegments;
 
    public EventImpl() {
    }
@@ -281,6 +284,7 @@ public class EventImpl<K, V> implements CacheEntryActivatedEvent, CacheEntryCrea
       if (isCurrentState != event.isCurrentState) return false;
       if (!Objects.equals(oldValue, event.oldValue)) return false;
       if (!Objects.equals(newValue, event.newValue)) return false;
+      if (!Objects.equals(lostSegments, event.lostSegments)) return false;
 
       return available == event.available;
    }
@@ -305,6 +309,7 @@ public class EventImpl<K, V> implements CacheEntryActivatedEvent, CacheEntryCrea
       result = 31 * result + (oldValue != null ? oldValue.hashCode() : 0);
       result = 31 * result + (newValue != null ? newValue.hashCode() : 0);
       result = 31 * result + (available ? 1 : 0);
+      result = 31 * result + (lostSegments != null ? lostSegments.hashCode() : 0);
       return result;
    }
 
@@ -320,6 +325,14 @@ public class EventImpl<K, V> implements CacheEntryActivatedEvent, CacheEntryCrea
                 ", readConsistentHashAtEnd=" + readConsistentHashAtEnd +
                 ", writeConsistentHashAtEnd=" + writeConsistentHashAtEnd +
                 ", unionConsistentHash=" + unionConsistentHash +
+                ", newTopologyId=" + newTopologyId +
+                '}';
+      if (type == Type.SEGMENTS_LOST)
+         return "EventImpl{" +
+                "type=" + type +
+                ", pre=" + pre +
+                ", cache=" + cache +
+                ", lostSegments=" + lostSegments +
                 ", newTopologyId=" + newTopologyId +
                 '}';
       return "EventImpl{" +
@@ -392,6 +405,15 @@ public class EventImpl<K, V> implements CacheEntryActivatedEvent, CacheEntryCrea
 
    public void setAvailabilityMode(AvailabilityMode mode) {
       this.mode = mode;
+   }
+
+   @Override
+   public IntSet getSegments() {
+      return lostSegments;
+   }
+
+   public void setLostSegments(IntSet lostSegments) {
+      this.lostSegments = lostSegments;
    }
 
    @Override

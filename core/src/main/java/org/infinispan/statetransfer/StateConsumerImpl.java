@@ -85,6 +85,7 @@ import org.infinispan.interceptors.AsyncInterceptorChain;
 import org.infinispan.metadata.impl.InternalMetadataImpl;
 import org.infinispan.notifications.cachelistener.CacheNotifier;
 import org.infinispan.notifications.cachelistener.annotation.DataRehashed;
+import org.infinispan.notifications.cachelistener.annotation.SegmentsLost;
 import org.infinispan.notifications.cachelistener.cluster.ClusterListenerReplicateCallable;
 import org.infinispan.persistence.manager.PersistenceManager;
 import org.infinispan.reactive.publisher.impl.ClusterPublisherManager;
@@ -348,6 +349,13 @@ public class StateConsumerImpl implements StateConsumer {
       if (startStateTransfer && !isRebalance) {
          if (log.isTraceEnabled()) log.tracef("Forcing startRebalance = true");
       }
+
+      // Detect segments that lost all their owners in the new topology so that clustered/local @SegmentsLost
+      // listeners can reconcile any state they derive from the cache.
+      final IntSet lostSegments = cacheNotifier.hasListener(SegmentsLost.class)
+            ? computeLostSegments(previousCacheTopology, cacheTopology)
+            : IntSets.immutableEmptySet();
+
       CompletionStage<Void> stage = CompletableFutures.completedNull();
       if (startStateTransfer) {
          // Only update the rebalance topology id when starting the rebalance, as we're going to ignore any state
@@ -506,6 +514,14 @@ public class StateConsumerImpl implements StateConsumer {
          }
          return CompletableFutures.completedNull();
       });
+      stage = stage.thenCompose(ignored -> {
+         // The new topology is already installed at this point, so the lost entries are no longer readable.
+         // Notify listeners now so they can reconcile their derived state.
+         if (!lostSegments.isEmpty()) {
+            return cacheNotifier.notifySegmentsLost(lostSegments, cacheTopology.getTopologyId());
+         }
+         return CompletableFutures.completedNull();
+      });
       return handleAndCompose(stage, (ignored, throwable) -> {
          if (log.isTraceEnabled()) {
             log.tracef("Unlock State Transfer in Progress for topology ID %s", cacheTopology.getTopologyId());
@@ -646,6 +662,42 @@ public class StateConsumerImpl implements StateConsumer {
    protected IntSet getOwnedSegments(ConsistentHash consistentHash) {
       Address address = rpcManager.getAddress();
       return IntSets.from(consistentHash.getSegmentsForOwner(address));
+   }
+
+   /**
+    * Computes the segments that lost all their data as a result of the topology change. A segment is considered
+    * lost when it had owners in the previous topology but none of those owners are members of the new topology,
+    * meaning the data stored in that segment is no longer available anywhere in the cluster.
+    *
+    * @param oldTopology the topology installed before this update, may be {@code null} on the first update.
+    * @param newTopology the topology that is being installed.
+    * @return the set of lost segments, never {@code null} (empty if nothing was lost).
+    */
+   private IntSet computeLostSegments(CacheTopology oldTopology, CacheTopology newTopology) {
+      if (oldTopology == null) {
+         return IntSets.immutableEmptySet();
+      }
+      ConsistentHash oldReadCH = oldTopology.getReadConsistentHash();
+      if (oldReadCH == null) {
+         return IntSets.immutableEmptySet();
+      }
+      // Use the members of the new consistent hash rather than the actual members: in degraded mode the owners
+      // are still part of the CH (the data is only temporarily unavailable, not lost), so they must not be
+      // reported as lost. When owners truly leave the cluster they are removed from the CH entirely.
+      Set<Address> newMembers = new HashSet<>(newTopology.getMembers());
+      int segments = oldReadCH.getNumSegments();
+      IntSet lostSegments = IntSets.mutableEmptySet(segments);
+      for (int segment = 0; segment < segments; segment++) {
+         List<Address> oldOwners = oldReadCH.locateOwnersForSegment(segment);
+         if (!oldOwners.isEmpty() && Collections.disjoint(oldOwners, newMembers)) {
+            lostSegments.set(segment);
+         }
+      }
+      if (!lostSegments.isEmpty() && log.isDebugEnabled()) {
+         log.debugf("Segments %s of cache %s lost all their owners in topology %d", lostSegments, cacheName,
+                    newTopology.getTopologyId());
+      }
+      return lostSegments;
    }
 
    @Override
